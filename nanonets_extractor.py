@@ -7,6 +7,7 @@ import json
 import re
 from typing import Dict, Any, List
 from customs_schema import CustomsDeclarationSchema, CustomsFieldMapper
+from complete_customs_schema import CompleteCustomsSchema, CompleteFieldMapper
 
 class NanoNetsExtractor:
     def __init__(self):
@@ -15,6 +16,8 @@ class NanoNetsExtractor:
         self.tokenizer = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.field_mapper = CustomsFieldMapper()
+        self.complete_mapper = CompleteFieldMapper()
+        self.complete_schema = CompleteCustomsSchema()
     
     async def initialize(self):
         def load_model():
@@ -205,114 +208,244 @@ Example structure:
         return enhanced_data
     
     def extract_customs_fields(self, extracted_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract and map customs declaration fields"""
-        customs_fields = {
-            # Message header
-            "nachrichtensender": {
-                "eoriNiederlassungsnummer": None
-            },
-            "nachrichtenempfanger": {
-                "dienststellennummer": None
-            },
-            
-            # Header information
-            "kopf": {
-                "lrn": None,
-                "artderAnmeldung": None,
-                "artderAusfuhranmeldung": None,
-                "beteiligtenKonstellation": None,
-                "zeitpunktderAnmeldung": None,
-                "massgeblichesDatum": None,
-                "kopfDatumdesAusgangs": None,
-                "zeitpunktDerGestellung": None,
-                "zeitpunktdesEndesderLadetatigkeit": None,
-                "sicherheit": None,
-                "besondereUmstande": None,
-                "inRechnunggestellterGesamtbetrag": None,
-                "rechnungswahrung": None,
-            },
-            
-            # Authorization
-            "bewilligung": {
-                "sequenznummer": None,
-                "art": None,
-                "referenznummer": None
-            },
-            
-            # Customs offices
-            "gestellungszollstelle": {
-                "gestellungszollstelle": None
-            },
-            "ausfuhrzollstelle": {
-                "ausfuhrzollstelleDienststellennummer": None
-            },
-            
-            # Parties
-            "anmelder": {
-                "tin": None,
-                "niederlassungsNummer": None,
-                "name": None,
-                "adresse": {
-                    "strasse": None,
-                    "plz": None,
-                    "ort": None,
-                    "land": None
-                },
-                "ansprechpartner": {
-                    "ansprechName": None,
-                    "phone": None,
-                    "ansprechEmail": None
-                }
-            },
-            
-            # Goods positions
-            "position": [],
-            
-            # Additional data
-            "additional_extracted_data": {}
+        """Extract and map ALL customs declaration fields using complete schema"""
+        # Start with complete empty schema
+        customs_fields = self.complete_schema.get_empty_schema()
+        
+        # Track all mapped and unmapped fields
+        mapping_results = {
+            "mapped_fields": {},
+            "unmapped_fields": {},
+            "field_mapping_confidence": {}
         }
         
-        # Map extracted data to customs fields
-        for key, value in extracted_data.items():
-            key_lower = key.lower()
+        # Process each extracted field
+        for extracted_key, extracted_value in extracted_data.items():
+            if extracted_key in ["extraction_metadata", "detected_field_patterns"]:
+                continue
+                
+            # Find best matching schema field
+            best_match = self.complete_mapper.find_best_field_match(extracted_key)
             
-            # Map LRN
-            if 'lrn' in key_lower or 'referenznummer' in key_lower:
-                customs_fields["kopf"]["lrn"] = value
-            
-            # Map dates
-            elif 'datum' in key_lower:
-                if 'anmeldung' in key_lower:
-                    customs_fields["kopf"]["zeitpunktderAnmeldung"] = value
-                elif 'ausgang' in key_lower:
-                    customs_fields["kopf"]["kopfDatumdesAusgangs"] = value
-                else:
-                    customs_fields["kopf"]["massgeblichesDatum"] = value
-            
-            # Map companies
-            elif 'anmelder' in key_lower or 'declarant' in key_lower:
-                if isinstance(value, dict):
-                    customs_fields["anmelder"].update(value)
-                else:
-                    customs_fields["anmelder"]["name"] = value
-            
-            # Map addresses
-            elif 'adresse' in key_lower or 'address' in key_lower:
-                if isinstance(value, dict):
-                    customs_fields["anmelder"]["adresse"].update(value)
-            
-            # Map positions/line items
-            elif 'position' in key_lower or 'line_items' in key_lower:
-                if isinstance(value, list):
-                    customs_fields["position"] = value
-                else:
-                    customs_fields["position"].append({"beschreibung": value})
-            
-            # Store additional data
+            if best_match:
+                # Map to schema structure
+                mapped_value = self._map_value_to_schema_path(
+                    customs_fields, best_match, extracted_value
+                )
+                mapping_results["mapped_fields"][extracted_key] = {
+                    "schema_field": best_match,
+                    "value": extracted_value,
+                    "mapped_successfully": mapped_value
+                }
+                mapping_results["field_mapping_confidence"][extracted_key] = "high"
             else:
-                customs_fields["additional_extracted_data"][key] = value
+                # Store unmapped fields for manual review
+                mapping_results["unmapped_fields"][extracted_key] = extracted_value
+        
+        # Enhanced field mapping with context analysis
+        self._perform_contextual_mapping(customs_fields, extracted_data, mapping_results)
+        
+        # Add mapping metadata
+        customs_fields["_mapping_metadata"] = mapping_results
         
         return customs_fields
+    
+    def _map_value_to_schema_path(self, schema: Dict[str, Any], field_path: str, value: Any) -> bool:
+        """Map extracted value to specific schema path"""
+        try:
+            # Handle specific field mappings
+            if field_path == "lrn":
+                schema["kopf"]["lrn"] = value
+            elif field_path == "eori":
+                if "anmelder" in str(value).lower():
+                    schema["anmelder"]["tin"] = value
+                else:
+                    schema["nachrichtensender"]["eoriNiederlassungsnummer"] = value
+            elif field_path == "anmelder":
+                if isinstance(value, dict):
+                    self._merge_nested_dict(schema["anmelder"], value)
+                else:
+                    schema["anmelder"]["name"] = value
+            elif field_path == "ausfuehrer":
+                if isinstance(value, dict):
+                    self._merge_nested_dict(schema["ausfuhrer"], value)
+                else:
+                    schema["ausfuhrer"]["name"] = value
+            elif field_path == "empfaenger":
+                if isinstance(value, dict):
+                    self._merge_nested_dict(schema["sendung"]["empfanger"], value)
+                else:
+                    schema["sendung"]["empfanger"]["name"] = value
+            elif field_path == "versender":
+                if isinstance(value, dict):
+                    self._merge_nested_dict(schema["sendung"]["versender"], value)
+                else:
+                    schema["sendung"]["versender"]["name"] = value
+            elif field_path in ["strasse", "plz", "ort", "land"]:
+                # Try to map to most likely address context
+                self._map_address_field(schema, field_path, value)
+            elif field_path == "warenbezeichnung":
+                if not schema["position"]:
+                    schema["position"] = [self.complete_schema.get_empty_schema()["position"][0].copy()]
+                schema["position"][0]["ware"]["wareWarenbezeichnung"] = value
+            elif field_path == "menge":
+                if not schema["position"]:
+                    schema["position"] = [self.complete_schema.get_empty_schema()["position"][0].copy()]
+                schema["position"][0]["ware"]["vermessung"]["mengeinbesondererMabeinheit"] = value
+            elif field_path == "containernummer":
+                if not schema["sendung"]["transportausrustung"]:
+                    schema["sendung"]["transportausrustung"] = [{"sequenznummer": None, "containernummer": None, "anzahlderVerschlusse": None, "verschluss": [], "warenpositionsverweis": []}]
+                schema["sendung"]["transportausrustung"][0]["containernummer"] = value
+            elif field_path == "bewilligung":
+                if isinstance(value, dict):
+                    self._merge_nested_dict(schema["bewilligung"], value)
+                else:
+                    schema["bewilligung"]["referenznummer"] = value
+            # Add more specific mappings as needed
+            else:
+                # Generic mapping for remaining fields
+                self._generic_field_mapping(schema, field_path, value)
+            
+            return True
+        except Exception as e:
+            print(f"Error mapping {field_path}: {e}")
+            return False
+    
+    def _merge_nested_dict(self, target: Dict, source: Dict):
+        """Merge nested dictionary into target"""
+        for key, value in source.items():
+            if isinstance(value, dict) and key in target and isinstance(target[key], dict):
+                self._merge_nested_dict(target[key], value)
+            else:
+                target[key] = value
+    
+    def _map_address_field(self, schema: Dict[str, Any], field_type: str, value: str):
+        """Map address fields to most appropriate context"""
+        address_contexts = [
+            schema["anmelder"]["adresse"],
+            schema["ausfuhrer"]["adresse"],
+            schema["sendung"]["versender"]["adresse"],
+            schema["sendung"]["empfanger"]["adresse"],
+            schema["sendung"]["warenort"]["adresse"]
+        ]
+        
+        # Map to first available context or anmelder as default
+        for addr_context in address_contexts:
+            if addr_context and not addr_context.get(field_type):
+                addr_context[field_type] = value
+                return
+        
+        # Default to anmelder
+        schema["anmelder"]["adresse"][field_type] = value
+    
+    def _generic_field_mapping(self, schema: Dict[str, Any], field_path: str, value: Any):
+        """Generic mapping for fields not specifically handled"""
+        # Try to place in appropriate section based on field name
+        if any(word in field_path for word in ["kopf", "header", "anmeldung"]):
+            if field_path in schema["kopf"]:
+                schema["kopf"][field_path] = value
+        elif any(word in field_path for word in ["position", "ware", "goods"]):
+            if not schema["position"]:
+                schema["position"] = [self.complete_schema.get_empty_schema()["position"][0].copy()]
+            # Try to place in position structure
+            self._place_in_position_structure(schema["position"][0], field_path, value)
+        elif any(word in field_path for word in ["sendung", "transport", "shipment"]):
+            self._place_in_sendung_structure(schema["sendung"], field_path, value)
+        else:
+            # Create additional_fields section if not exists
+            if "_additional_fields" not in schema:
+                schema["_additional_fields"] = {}
+            schema["_additional_fields"][field_path] = value
+    
+    def _place_in_position_structure(self, position: Dict[str, Any], field_path: str, value: Any):
+        """Place field in appropriate position structure"""
+        if any(word in field_path for word in ["ware", "goods", "warenbezeichnung"]):
+            if "ware" in position and field_path in position["ware"]:
+                position["ware"][field_path] = value
+        elif any(word in field_path for word in ["verpackung", "package"]):
+            if not position["verpackung"]:
+                position["verpackung"] = [{"sequenznummer": None, "artderVerpackung": None, "anzahlderPackstucke": None, "versandzeichen": None, "packstuckverweis": {"packstuckverweisPositionsnummer": None}}]
+            if field_path in position["verpackung"][0]:
+                position["verpackung"][0][field_path] = value
+        else:
+            if field_path in position:
+                position[field_path] = value
+    
+    def _place_in_sendung_structure(self, sendung: Dict[str, Any], field_path: str, value: Any):
+        """Place field in appropriate sendung structure"""
+        if field_path in sendung:
+            sendung[field_path] = value
+        elif any(word in field_path for word in ["transport", "befoerderung"]):
+            # Handle transport-related fields
+            if "transportausrustung" in field_path and sendung["transportausrustung"]:
+                if field_path in sendung["transportausrustung"][0]:
+                    sendung["transportausrustung"][0][field_path] = value
+    
+    def _perform_contextual_mapping(self, schema: Dict[str, Any], extracted_data: Dict[str, Any], mapping_results: Dict[str, Any]):
+        """Perform additional contextual mapping based on document structure"""
+        # Analyze patterns in extracted data
+        
+        # Look for table structures (common in positions)
+        table_data = self._extract_table_structures(extracted_data)
+        if table_data:
+            self._map_table_to_positions(schema, table_data)
+        
+        # Look for address blocks
+        address_blocks = self._extract_address_blocks(extracted_data)
+        if address_blocks:
+            self._map_address_blocks(schema, address_blocks)
+        
+        # Look for date patterns
+        date_fields = self._extract_date_fields(extracted_data)
+        if date_fields:
+            self._map_date_fields(schema, date_fields)
+    
+    def _extract_table_structures(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Extract table-like structures from data"""
+        tables = []
+        # Implementation depends on how table data is structured in extraction
+        # This is a placeholder for table detection logic
+        return tables
+    
+    def _extract_address_blocks(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Extract address block structures"""
+        addresses = []
+        # Look for grouped address information
+        return addresses
+    
+    def _extract_date_fields(self, data: Dict[str, Any]) -> Dict[str, str]:
+        """Extract date fields from data"""
+        dates = {}
+        for key, value in data.items():
+            if isinstance(value, str) and any(date_indicator in key.lower() for date_indicator in ["datum", "date", "zeit"]):
+                dates[key] = value
+        return dates
+    
+    def _map_table_to_positions(self, schema: Dict[str, Any], table_data: List[Dict[str, Any]]):
+        """Map table data to position entries"""
+        pass
+    
+    def _map_address_blocks(self, schema: Dict[str, Any], address_blocks: List[Dict[str, Any]]):
+        """Map address blocks to appropriate parties"""
+        pass
+    
+    def _map_date_fields(self, schema: Dict[str, Any], date_fields: Dict[str, str]):
+        """Map date fields to appropriate schema locations"""
+        for field_name, date_value in date_fields.items():
+            normalized_field = self.complete_mapper.normalize_field_name(field_name)
+            
+            if "anmeldung" in normalized_field:
+                schema["kopf"]["zeitpunktderAnmeldung"] = date_value
+            elif "ausgang" in normalized_field:
+                schema["kopf"]["kopfDatumdesAusgangs"] = date_value
+            elif "gestellung" in normalized_field:
+                schema["kopf"]["zeitpunktDerGestellung"] = date_value
+            elif "massgeblich" in normalized_field or "relevant" in normalized_field:
+                schema["kopf"]["massgeblichesDatum"] = date_value
+            else:
+                # Default to massgeblichesDatum if unclear
+                if not schema["kopf"]["massgeblichesDatum"]:
+                    schema["kopf"]["massgeblichesDatum"] = date_value
     
     def extract_invoice_fields(self, extracted_data: Dict[str, Any]) -> Dict[str, Any]:
         invoice_fields = {
