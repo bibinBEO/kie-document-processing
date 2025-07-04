@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KIE Document Processing</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .upload-section {
+            border: 2px dashed #ddd;
+            border-radius: 10px;
+            padding: 40px;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .upload-section.dragover {
+            border-color: #007bff;
+            background-color: #f0f8ff;
+        }
+        .file-input {
+            margin: 20px 0;
+        }
+        .btn {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 10px;
+        }
+        .btn:hover {
+            background-color: #0056b3;
+        }
+        .btn:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        .progress {
+            display: none;
+            margin: 20px 0;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background-color: #e9ecef;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%;
+            background-color: #007bff;
+            transition: width 0.3s ease;
+        }
+        .results {
+            display: none;
+            margin-top: 30px;
+        }
+        .results h2 {
+            color: #333;
+            border-bottom: 2px solid #007bff;
+            padding-bottom: 10px;
+        }
+        .json-output {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 20px;
+            font-family: monospace;
+            white-space: pre-wrap;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .error {
+            color: #dc3545;
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 20px 0;
+        }
+        .success {
+            color: #155724;
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 20px 0;
+        }
+        .supported-formats {
+            font-size: 14px;
+            color: #6c757d;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>KIE Document Processing</h1>
+        <p style="text-align: center; color: #666;">Upload invoices, waybills, and documents for automatic key-value extraction</p>
+        
+        <div class="upload-section" id="uploadSection">
+            <h3>Upload Document</h3>
+            <p>Drag and drop your file here or click to browse</p>
+            <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg,.docx,.txt" style="display: none;">
+            <button class="btn" onclick="document.getElementById('fileInput').click()">Choose File</button>
+            <div class="supported-formats">
+                Supported formats: PDF, PNG, JPG, JPEG, DOCX, TXT
+            </div>
+        </div>
+        
+        <div class="progress" id="progressSection">
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            <p id="progressText">Processing...</p>
+        </div>
+        
+        <div id="messageArea"></div>
+        
+        <div class="results" id="resultsSection">
+            <h2>Extracted Data</h2>
+            <div class="json-output" id="jsonOutput"></div>
+            <button class="btn" onclick="downloadResults()">Download JSON</button>
+        </div>
+    </div>
+
+    <script>
+        let currentJobId = null;
+        let extractedData = null;
+        
+        const uploadSection = document.getElementById('uploadSection');
+        const fileInput = document.getElementById('fileInput');
+        const progressSection = document.getElementById('progressSection');
+        const progressFill = document.getElementById('progressFill');
+        const progressText = document.getElementById('progressText');
+        const messageArea = document.getElementById('messageArea');
+        const resultsSection = document.getElementById('resultsSection');
+        const jsonOutput = document.getElementById('jsonOutput');
+        
+        // Drag and drop functionality
+        uploadSection.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadSection.classList.add('dragover');
+        });
+        
+        uploadSection.addEventListener('dragleave', () => {
+            uploadSection.classList.remove('dragover');
+        });
+        
+        uploadSection.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadSection.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        });
+        
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFile(e.target.files[0]);
+            }
+        });
+        
+        async function handleFile(file) {
+            showMessage('Uploading file...', 'success');
+            showProgress(0);
+            
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                const uploadResponse = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!uploadResponse.ok) {
+                    throw new Error('Upload failed');
+                }
+                
+                const uploadResult = await uploadResponse.json();
+                currentJobId = uploadResult.job_id;
+                
+                showProgress(30);
+                showMessage('File uploaded successfully. Processing...', 'success');
+                
+                // Start extraction
+                await extractDocument();
+                
+            } catch (error) {
+                showMessage('Error: ' + error.message, 'error');
+                hideProgress();
+            }
+        }
+        
+        async function extractDocument() {
+            if (!currentJobId) return;
+            
+            try {
+                showProgress(50);
+                progressText.textContent = 'Extracting data...';
+                
+                const extractResponse = await fetch(`/extract/${currentJobId}`, {
+                    method: 'POST'
+                });
+                
+                if (!extractResponse.ok) {
+                    throw new Error('Extraction failed');
+                }
+                
+                const extractResult = await extractResponse.json();
+                extractedData = extractResult;
+                
+                showProgress(100);
+                showMessage('Document processed successfully!', 'success');
+                showResults(extractResult);
+                
+            } catch (error) {
+                showMessage('Error: ' + error.message, 'error');
+                hideProgress();
+            }
+        }
+        
+        function showProgress(percentage) {
+            progressSection.style.display = 'block';
+            progressFill.style.width = percentage + '%';
+            
+            if (percentage === 100) {
+                setTimeout(hideProgress, 2000);
+            }
+        }
+        
+        function hideProgress() {
+            progressSection.style.display = 'none';
+        }
+        
+        function showMessage(message, type) {
+            messageArea.innerHTML = `<div class="${type}">${message}</div>`;
+            
+            if (type === 'success') {
+                setTimeout(() => {
+                    messageArea.innerHTML = '';
+                }, 3000);
+            }
+        }
+        
+        function showResults(data) {
+            resultsSection.style.display = 'block';
+            jsonOutput.textContent = JSON.stringify(data, null, 2);
+        }
+        
+        function downloadResults() {
+            if (!extractedData) return;
+            
+            const blob = new Blob([JSON.stringify(extractedData, null, 2)], {
+                type: 'application/json'
+            });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `extracted_data_${currentJobId}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+    </script>
+</body>
+</html>
