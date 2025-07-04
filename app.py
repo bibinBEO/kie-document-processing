@@ -78,7 +78,18 @@ async def extract_document(job_id: str):
         results = []
         for image in processed_images:
             extracted_data = await extractor.extract_key_value_pairs(image)
-            results.append(extracted_data)
+            
+            # Enhanced processing with customs field mapping
+            customs_data = extractor.extract_customs_fields(extracted_data)
+            
+            # Combine both formats for flexibility
+            combined_result = {
+                "raw_extraction": extracted_data,
+                "customs_format": customs_data,
+                "invoice_format": extractor.extract_invoice_fields(extracted_data)
+            }
+            
+            results.append(combined_result)
         
         result_data = {
             "job_id": job_id,

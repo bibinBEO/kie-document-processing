@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 from typing import Dict, Any, List
+from customs_schema import CustomsDeclarationSchema, CustomsFieldMapper
 
 class NanoNetsExtractor:
     def __init__(self):
@@ -13,6 +14,7 @@ class NanoNetsExtractor:
         self.processor = None
         self.tokenizer = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.field_mapper = CustomsFieldMapper()
     
     async def initialize(self):
         def load_model():
@@ -90,31 +92,66 @@ class NanoNetsExtractor:
         return self._parse_response(raw_response)
     
     def _create_extraction_prompt(self) -> str:
-        return """Extract all key-value pairs from this document. Focus on:
-- Invoice details (invoice number, date, due date, amount)
-- Company information (vendor name, address, contact details)  
-- Customer information (bill to, ship to addresses)
-- Line items (description, quantity, price, total)
-- Payment terms and tax information
+        return """Extract all key-value pairs from this German customs export declaration (Ausfuhranmeldung) or related document. Focus on:
+
+PRIORITY FIELDS (German customs export declaration):
+- LRN (Local Reference Number / Lokale Referenznummer)
+- MRN (Movement Reference Number / Bearbeitungsnummer)
+- EORI-Nummer (Economic Operator Registration and Identification)
+- Anmeldedatum, Ausgangsdatum, Gültigkeitsdatum
+- Anmelder, Ausführer, Empfänger, Versender (Name, Adresse, Kontakt)
+- Zollstellen (Gestellungszollstelle, Ausfuhrzollstelle, Ausgangszollstelle)
+- Warenbezeichnung, Warennummer, Ursprungsland, Bestimmungsland
+- Menge, Gewicht (Rohmasse, Eigenmasse), Wert, Währung
+- Verkehrszweig, Kennzeichen, Containernummer
+- Verfahren, Bewilligung, Dokumente
+- Besondere Umstände, Zusätzliche Angaben
+
+ALSO EXTRACT (if present):
+- Invoice details (Rechnung: Nummer, Datum, Betrag)
+- Company information (Firmenname, Adresse, Kontaktdaten)
+- Line items (Positionen: Beschreibung, Menge, Preis)
+- Transport information (Transportmittel, Route)
 - Any other relevant document data
 
-Format the response as a JSON object with clear key-value pairs. Use descriptive keys and ensure all extracted text is accurate. For German text, preserve the original language.
+INSTRUCTIONS:
+1. Preserve German text exactly as written
+2. Extract ALL text fields, even if they seem incomplete
+3. Include field labels/headers when visible
+4. Capture table data with row/column structure
+5. Note any handwritten text or stamps
+6. Extract dates in original format
+7. Include reference numbers, codes, and identifiers
 
-Example format:
+Format as comprehensive JSON with nested structure matching German customs declaration format. Use German field names where applicable.
+
+Example structure:
 {
-    "invoice_number": "INV-2024-001",
-    "date": "2024-01-15",
-    "vendor_name": "ABC Company",
-    "total_amount": "1,250.00",
-    "currency": "EUR",
-    "line_items": [
-        {
-            "description": "Product A",
-            "quantity": "2",
-            "unit_price": "500.00",
-            "total": "1,000.00"
+    "document_type": "Ausfuhranmeldung",
+    "lrn": "DE123456789",
+    "kopf": {
+        "anmeldedatum": "2024-01-15",
+        "artderAnmeldung": "..."
+    },
+    "anmelder": {
+        "name": "Firma XYZ GmbH",
+        "adresse": {
+            "strasse": "Musterstraße 123",
+            "plz": "12345",
+            "ort": "Berlin",
+            "land": "DE"
         }
-    ]
+    },
+    "position": [
+        {
+            "warenbezeichnung": "Maschinenbauteile",
+            "menge": "100",
+            "wert": "50000.00"
+        }
+    ],
+    "additional_extracted_data": {
+        "any_other_fields": "..."
+    }
 }"""
     
     def _parse_response(self, response: str) -> Dict[str, Any]:
@@ -122,7 +159,11 @@ Example format:
             json_match = re.search(r'\{.*\}', response, re.DOTALL)
             if json_match:
                 json_str = json_match.group(0)
-                return json.loads(json_str)
+                parsed_data = json.loads(json_str)
+                
+                # Enhance with field mapping
+                enhanced_data = self._enhance_with_field_mapping(parsed_data, response)
+                return enhanced_data
             else:
                 return self._fallback_parse(response)
         except json.JSONDecodeError:
@@ -141,6 +182,136 @@ Example format:
                     result[key] = value
         
         return result
+    
+    def _enhance_with_field_mapping(self, parsed_data: Dict[str, Any], raw_response: str) -> Dict[str, Any]:
+        """Enhance parsed data with field mapping and pattern matching"""
+        enhanced_data = parsed_data.copy()
+        
+        # Find potential field matches in raw response
+        field_matches = self.field_mapper.find_matching_fields(raw_response)
+        
+        if field_matches:
+            enhanced_data["detected_field_patterns"] = field_matches
+        
+        # Add metadata
+        enhanced_data["extraction_metadata"] = {
+            "model_used": "nanonets-ocr-s",
+            "extraction_timestamp": "2024-01-15T10:00:00Z",
+            "field_mapping_applied": True,
+            "total_fields_detected": len(field_matches) if field_matches else 0
+        }
+        
+        return enhanced_data
+    
+    def extract_customs_fields(self, extracted_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract and map customs declaration fields"""
+        customs_fields = {
+            # Message header
+            "nachrichtensender": {
+                "eoriNiederlassungsnummer": None
+            },
+            "nachrichtenempfanger": {
+                "dienststellennummer": None
+            },
+            
+            # Header information
+            "kopf": {
+                "lrn": None,
+                "artderAnmeldung": None,
+                "artderAusfuhranmeldung": None,
+                "beteiligtenKonstellation": None,
+                "zeitpunktderAnmeldung": None,
+                "massgeblichesDatum": None,
+                "kopfDatumdesAusgangs": None,
+                "zeitpunktDerGestellung": None,
+                "zeitpunktdesEndesderLadetatigkeit": None,
+                "sicherheit": None,
+                "besondereUmstande": None,
+                "inRechnunggestellterGesamtbetrag": None,
+                "rechnungswahrung": None,
+            },
+            
+            # Authorization
+            "bewilligung": {
+                "sequenznummer": None,
+                "art": None,
+                "referenznummer": None
+            },
+            
+            # Customs offices
+            "gestellungszollstelle": {
+                "gestellungszollstelle": None
+            },
+            "ausfuhrzollstelle": {
+                "ausfuhrzollstelleDienststellennummer": None
+            },
+            
+            # Parties
+            "anmelder": {
+                "tin": None,
+                "niederlassungsNummer": None,
+                "name": None,
+                "adresse": {
+                    "strasse": None,
+                    "plz": None,
+                    "ort": None,
+                    "land": None
+                },
+                "ansprechpartner": {
+                    "ansprechName": None,
+                    "phone": None,
+                    "ansprechEmail": None
+                }
+            },
+            
+            # Goods positions
+            "position": [],
+            
+            # Additional data
+            "additional_extracted_data": {}
+        }
+        
+        # Map extracted data to customs fields
+        for key, value in extracted_data.items():
+            key_lower = key.lower()
+            
+            # Map LRN
+            if 'lrn' in key_lower or 'referenznummer' in key_lower:
+                customs_fields["kopf"]["lrn"] = value
+            
+            # Map dates
+            elif 'datum' in key_lower:
+                if 'anmeldung' in key_lower:
+                    customs_fields["kopf"]["zeitpunktderAnmeldung"] = value
+                elif 'ausgang' in key_lower:
+                    customs_fields["kopf"]["kopfDatumdesAusgangs"] = value
+                else:
+                    customs_fields["kopf"]["massgeblichesDatum"] = value
+            
+            # Map companies
+            elif 'anmelder' in key_lower or 'declarant' in key_lower:
+                if isinstance(value, dict):
+                    customs_fields["anmelder"].update(value)
+                else:
+                    customs_fields["anmelder"]["name"] = value
+            
+            # Map addresses
+            elif 'adresse' in key_lower or 'address' in key_lower:
+                if isinstance(value, dict):
+                    customs_fields["anmelder"]["adresse"].update(value)
+            
+            # Map positions/line items
+            elif 'position' in key_lower or 'line_items' in key_lower:
+                if isinstance(value, list):
+                    customs_fields["position"] = value
+                else:
+                    customs_fields["position"].append({"beschreibung": value})
+            
+            # Store additional data
+            else:
+                customs_fields["additional_extracted_data"][key] = value
+        
+        return customs_fields
     
     def extract_invoice_fields(self, extracted_data: Dict[str, Any]) -> Dict[str, Any]:
         invoice_fields = {
