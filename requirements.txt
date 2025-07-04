@@ -9,4 +9,3 @@ python-docx==0.8.11
 aiofiles==23.2.0
 qwen-vl-utils==0.0.3
 accelerate==0.25.0
-flash-attn==2.3.3

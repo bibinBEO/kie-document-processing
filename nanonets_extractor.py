@@ -26,6 +26,7 @@ class NanoNetsExtractor:
                 model_name,
                 device_map="auto",
                 torch_dtype="auto",
+                ignore_mismatched_sizes=True,
                 attn_implementation="flash_attention_2"
             )
             
