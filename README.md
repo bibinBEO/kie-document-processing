@@ -22,7 +22,6 @@ A web application for Knowledge Information Extraction (KIE) from documents usin
 1. **Clone the repository**:
 ```bash
 git clone <repository-url>
-cd claude-code
 ```
 
 2. **Install dependencies**:
